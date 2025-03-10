@@ -1,4 +1,5 @@
-![Uploading Github_Banner.png…]()
+![Github_Banner](https://github.com/user-attachments/assets/d4092702-7982-4237-bfb2-1cef75cecff7)
+
 
 
 # Image analysis for nanoscale particles
