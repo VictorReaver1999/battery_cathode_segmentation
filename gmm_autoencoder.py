@@ -3,42 +3,17 @@
 """
 SAM-Enhanced Battery Material Segmentation with Gaussian Mixture Models
 
-This module combines Segment Anything Model (SAM) masks with statistical Gaussian Mixture Model (GMM)
-classification to perform sophisticated material segmentation in SEM images of battery materials.
-The pipeline includes automatic metadata removal, feature extraction using both traditional image
-processing and deep learning autoencoders, and probabilistic classification with GMMs.
+This module combines Segment Anything Model (SAM) masks with Gaussian Mixture Model (GMM)
+statistical classification to accurately segment battery materials in SEM images.
 
 Key Features:
-- Automatic detection and removal of microscope metadata bars
-- Integration of SAM-generated masks for precise particle boundaries
-- Hybrid feature extraction combining traditional and deep learning approaches
-- Probabilistic classification with adjustable GMM components
-- Comprehensive post-processing and visualization capabilities
-- CSV export for quantitative analysis
-
-Classes:
-    None
-
-Functions:
-    load_sem_image: Load SEM image from file
-    detect_metadata_bar: Detect and mask microscope metadata regions
-    preprocess_image: Enhance image quality through filtering and contrast adjustment
-    load_sam_masks: Load segmentation masks from SAM output
-    build_autoencoder: Construct convolutional autoencoder for feature learning
-    extract_particle_patches: Extract image regions for autoencoder training
-    extract_mask_features: Calculate traditional image features from mask regions
-    train_autoencoder: Train deep feature extractor on particle patches
-    extract_autoencoder_features: Generate deep features using trained encoder
-    train_gmm: Train Gaussian Mixture Model on extracted features
-    classify_with_gmm: Classify particles using trained GMM
-    segment_with_gmm_sam: Main segmentation pipeline
-    visualize_segmentation: Generate comparative visualization of results
-    calculate_material_stats: Calculate quantitative material distribution statistics
-    export_to_csv: Export segmentation results to CSV format
-    main: Command-line interface handler
-
-Dependencies:
-    OpenCV, scikit-learn, TensorFlow, matplotlib, scipy, scikit-image
+    - Identifies 4 material types: Voids, Carbon Black, LFP, NaCl
+    - Uses SAM masks for precise particle boundary identification
+    - Employs Gaussian Mixture Models for statistical classification
+    - Includes autoencoder-based feature extraction for improved accuracy
+    - Automatically removes microscope metadata bars
+    - Provides visualization and statistics of material distribution
+    - Exports results to CSV format for further analysis
 """
 
 import os
@@ -48,6 +23,7 @@ import argparse
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from PIL.Image import alpha_composite
 from matplotlib.colors import ListedColormap
 import pandas as pd
 from scipy import ndimage
@@ -59,17 +35,16 @@ from tensorflow.keras import layers, models
 
 
 def load_sem_image(image_path):
-    """
-    Load and preprocess a scanning electron microscope (SEM) image.
+    """Load a SEM image from disk.
 
     Args:
-        image_path (str): Path to the SEM image file (PNG format recommended)
+        image_path (str): Path to the SEM image file.
 
     Returns:
-        numpy.ndarray: Grayscale image as 2D numpy array with values in [0, 255]
+        numpy.ndarray: Grayscale image as a 2D numpy array.
 
     Raises:
-        FileNotFoundError: If specified image file cannot be loaded
+        FileNotFoundError: If the specified image file doesn't exist.
     """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -78,19 +53,18 @@ def load_sem_image(image_path):
 
 
 def detect_metadata_bar(img, threshold_percent=0.1):
-    """
-    Detect and mask microscope metadata bar at image bottom.
+    """Detect and create a mask for the microscope metadata bar.
 
-        Uses edge detection and texture analysis to identify metadata regions containing
-        microscope parameters and measurement information.
+    Uses edge detection to identify text and information bars commonly
+    present in SEM images.
 
-        Args:
-            img (numpy.ndarray): Input grayscale image
-            threshold_percent (float, optional): Percentage of image height to analyze
-                for metadata detection. Defaults to 0.1 (10% of image height).
+    Args:
+        img (numpy.ndarray): Original grayscale image.
+        threshold_percent (float): Percentage of image height to check for
+                                  abrupt changes indicating metadata.
 
-        Returns:
-            numpy.ndarray: Boolean mask where True indicates valid image regions
+    Returns:
+        numpy.ndarray: Binary mask where True indicates pixels to keep (not metadata).
     """
     h, w = img.shape
 
@@ -137,18 +111,16 @@ def detect_metadata_bar(img, threshold_percent=0.1):
 
 
 def preprocess_image(img):
-    """Enhance image quality through multi-stage processing pipeline.
+    """Apply preprocessing to enhance image features.
 
-    Processing steps:
-    1. Median filtering for noise reduction
-    2. CLAHE (Contrast Limited Adaptive Histogram Equalization) for local contrast enhancement
-    3. Gaussian blurring for high-frequency noise reduction
+    Applies a sequence of image processing techniques to enhance contrast
+    and reduce noise in the SEM image.
 
     Args:
-        img (numpy.ndarray): Raw grayscale SEM image
+        img (numpy.ndarray): Original grayscale image.
 
     Returns:
-        numpy.ndarray: Processed image with enhanced features
+        numpy.ndarray: Enhanced grayscale image with improved contrast and reduced noise.
     """
     # Apply median filter to reduce noise
     img_median = cv2.medianBlur(img, 3)
@@ -164,17 +136,17 @@ def preprocess_image(img):
 
 
 def load_sam_masks(pickle_path):
-    """
-    Load segmentation masks generated by Segment Anything Model (SAM).
+    """Load segmentation masks from SAM pickle file.
+
+    Loads and extracts masks generated by the Segment Anything Model (SAM),
+    which identify individual particles in the SEM image.
 
     Args:
-        pickle_path (str): Path to SAM output pickle file containing mask data
+        pickle_path (str): Path to the pickle file containing SAM masks.
 
     Returns:
-        list[numpy.ndarray] or None: List of boolean masks or None if loading fails
-
-    Raises:
-        IOError: If pickle file structure is invalid or cannot be read
+        list: List of binary masks (numpy.ndarray) for each detected particle,
+              or None if loading fails.
     """
     try:
         with open(pickle_path, 'rb') as f:
@@ -194,57 +166,43 @@ def load_sam_masks(pickle_path):
         return None
 
 
-def build_autoencoder(input_shape=(64, 64, 1)):
-    """
-    Construct convolutional autoencoder with residual connections.
+def build_autoencoder(input_shape=(32, 32, 1)):
+    """Build a convolutional autoencoder for feature extraction.
 
-    Architecture Details:
-    - Encoder: 3 convolutional blocks with residual connections and max pooling
-    - Latent space: 128-dimensional dense representation
-    - Decoder: Transposed convolutions for image reconstruction
+    Creates a deep neural network with an encoder-decoder architecture
+    for learning compact representations of particle images.
 
     Args:
-        input_shape (tuple, optional): Input tensor shape. Defaults to (64, 64, 1).
+        input_shape (tuple): Shape of input image patches (height, width, channels).
 
     Returns:
-        tuple: (autoencoder_model, encoder_model) Keras model instances
+        tuple: (autoencoder, encoder) - complete model and feature extractor component.
     """
     # Encoder
     inputs = layers.Input(shape=input_shape)
 
-    # First block with residual connection
-    x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)
+    # First block
+    x = layers.Conv2D(16, (3, 3), activation='relu', padding='same')(inputs)
     x = layers.BatchNormalization()(x)
     x = layers.MaxPooling2D((2, 2), padding='same')(x)
 
-    # Second block with residual connection
-    skip1 = x
-    x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+    # Second block
+    x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
     x = layers.BatchNormalization()(x)
-    x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.add([x, layers.Conv2D(64, (1, 1))(skip1)])  # Residual connection
     x = layers.MaxPooling2D((2, 2), padding='same')(x)
 
     # Third block
-    skip2 = x
-    x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+    x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
     x = layers.BatchNormalization()(x)
-    x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.add([x, layers.Conv2D(128, (1, 1))(skip2)])  # Residual connection
     x = layers.MaxPooling2D((2, 2), padding='same')(x)
 
     # Latent representation
     x = layers.Flatten()(x)
-    latent = layers.Dense(128, activation='relu')(x)
+    latent = layers.Dense(64, activation='relu')(x)
 
-    # Decoder (for training only)
-    x = layers.Dense(8 * 8 * 128, activation='relu')(latent)
-    x = layers.Reshape((8, 8, 128))(x)
-
-    x = layers.Conv2DTranspose(128, (3, 3), strides=2, activation='relu', padding='same')(x)
-    x = layers.BatchNormalization()(x)
+    # Decoder
+    x = layers.Dense(4 * 4 * 64, activation='relu')(latent)
+    x = layers.Reshape((4, 4, 64))(x)
 
     x = layers.Conv2DTranspose(64, (3, 3), strides=2, activation='relu', padding='same')(x)
     x = layers.BatchNormalization()(x)
@@ -252,9 +210,12 @@ def build_autoencoder(input_shape=(64, 64, 1)):
     x = layers.Conv2DTranspose(32, (3, 3), strides=2, activation='relu', padding='same')(x)
     x = layers.BatchNormalization()(x)
 
+    x = layers.Conv2DTranspose(16, (3, 3), strides=2, activation='relu', padding='same')(x)
+    x = layers.BatchNormalization()(x)
+
     outputs = layers.Conv2D(1, (3, 3), activation='sigmoid', padding='same')(x)
 
-    # Define models for autoencoder and encoder
+    # Define models
     autoencoder = models.Model(inputs, outputs)
     encoder = models.Model(inputs, latent)
 
@@ -264,20 +225,32 @@ def build_autoencoder(input_shape=(64, 64, 1)):
     return autoencoder, encoder
 
 
-def extract_particle_patches(img, masks, patch_size=64, metadata_mask=None):
-    """
-    Extract fixed-size image patches centered on detected particles.
+def extract_standardized_particle_patches(img, masks, metadata_mask=None, target_size=32):
+    """Extract standardized image patches with aspect ratio preservation.
+
+    Implements the whiteboard steps exactly:
+    1. Get BBox coordinates from masks
+    2. Apply BBox coordinates to original image
+    3. Fill "False" areas with 0 (black)
+    4. Pad borders to create squares
+    5. Find highest value of all dimensions
+    6. Pad each square to the maximum dimension
+    7. Resize each square to target size
 
     Args:
-        img (numpy.ndarray): Source grayscale image
-        masks (list[numpy.ndarray]): List of boolean masks from SAM
-        patch_size (int, optional): Output patch size. Defaults to 64.
-        metadata_mask (numpy.ndarray, optional): Region mask to exclude. Defaults to None.
+        img (numpy.ndarray): Original or preprocessed SEM image.
+        masks (list): List of binary masks identifying particles.
+        metadata_mask (numpy.ndarray, optional): Binary mask for valid image areas.
+        target_size (int): Final size of extracted square patches in pixels.
 
     Returns:
-        numpy.ndarray: Array of extracted patches shaped (N, patch_size, patch_size)
+        numpy.ndarray: Array of standardized image patches.
     """
     patches = []
+    raw_patches = []
+
+    # First pass: Extract each particle and find maximum dimension
+    max_dim = 0
 
     for mask in masks:
         # Skip masks with no pixels or that overlap with metadata
@@ -289,7 +262,7 @@ def extract_particle_patches(img, masks, patch_size=64, metadata_mask=None):
             if np.sum(mask & (~metadata_mask)) > 0.2 * np.sum(mask):
                 continue
 
-        # Get particle bounding box
+        # Step 1: Get particle bounding box
         y_indices, x_indices = np.where(mask)
         if len(y_indices) == 0:
             continue
@@ -297,51 +270,68 @@ def extract_particle_patches(img, masks, patch_size=64, metadata_mask=None):
         y_min, y_max = np.min(y_indices), np.max(y_indices)
         x_min, x_max = np.min(x_indices), np.max(x_indices)
 
-        # Calculate center
-        center_y = (y_min + y_max) // 2
-        center_x = (x_min + x_max) // 2
+        # Step 2: Extract the patch (crop using bounding box)
+        patch = img[y_min:y_max + 1, x_min:x_max + 1].copy()
 
-        # Define patch boundaries
-        half_size = patch_size // 2
-        y1 = max(0, center_y - half_size)
-        y2 = min(img.shape[0], center_y + half_size)
-        x1 = max(0, center_x - half_size)
-        x2 = min(img.shape[1], center_x + half_size)
+        # Create mask for this specific patch
+        local_mask = mask[y_min:y_max + 1, x_min:x_max + 1]
 
-        # Skip patches that overlap with metadata
-        if metadata_mask is not None and not np.all(metadata_mask[y1:y2, x1:x2]):
-            continue
+        # Step 3: Fill "False" areas with 0 (background)
+        patch[~local_mask] = 0
 
-        # Extract the patch
-        patch = img[y1:y2, x1:x2]
+        # Record dimensions for later use
+        h, w = patch.shape
+        max_dim = max(max_dim, h, w)
 
-        # Resize if necessary
-        if patch.shape[0] != patch_size or patch.shape[1] != patch_size:
-            patch = cv2.resize(patch, (patch_size, patch_size))
+        raw_patches.append(patch)
 
-        patches.append(patch)
+    if len(raw_patches) == 0:
+        return np.array([])
+
+    # Second pass: Process all patches to same dimensions
+    for patch in raw_patches:
+        h, w = patch.shape
+
+        # Step 4: Pad to make square
+        max_side = max(h, w)
+        square_patch = np.zeros((max_side, max_side), dtype=patch.dtype)
+        y_offset = (max_side - h) // 2
+        x_offset = (max_side - w) // 2
+        square_patch[y_offset:y_offset + h, x_offset:x_offset + w] = patch
+
+        # Step 5-6: Pad to match largest dimension across all particles
+        if max_side < max_dim:
+            padded_patch = np.zeros((max_dim, max_dim), dtype=patch.dtype)
+            offset = (max_dim - max_side) // 2
+            padded_patch[offset:offset + max_side, offset:offset + max_side] = square_patch
+            standardized = padded_patch
+        else:
+            standardized = square_patch
+
+        # Step 7: Resize to target size
+        resized = cv2.resize(standardized, (target_size, target_size),
+                             interpolation=cv2.INTER_AREA)
+
+        patches.append(resized)
 
     return np.array(patches)
 
 
 def extract_mask_features(img, enhanced_img, mask, metadata_mask):
-    """
-    Calculate comprehensive feature set for a masked region.
+    """Extract features from a specific mask region.
 
-    Extracted features include:
-    - Intensity statistics (mean, std, median, min/max)
-    - Texture features (GLCM-based complexity)
-    - Shape features (area, compactness)
-    - Enhanced image characteristics
+    Calculates intensity, texture, and shape features from the region of the
+    image defined by the mask.
 
     Args:
-        img (numpy.ndarray): Original grayscale image
-        enhanced_img (numpy.ndarray): Preprocessed image
-        mask (numpy.ndarray): Boolean mask defining region of interest
-        metadata_mask (numpy.ndarray): Valid region mask
+        img (numpy.ndarray): Original grayscale image.
+        enhanced_img (numpy.ndarray): Preprocessed image with enhanced features.
+        mask (numpy.ndarray): Binary mask defining the region of interest.
+        metadata_mask (numpy.ndarray): Binary mask defining valid image areas.
 
     Returns:
-        dict or None: Feature dictionary or None for invalid regions
+        dict: Dictionary of features including intensity statistics, texture metrics,
+              and shape characteristics, or None if the mask has too few pixels.
     """
     # Apply the metadata mask to the particle mask
     valid_mask = mask & metadata_mask
@@ -349,6 +339,13 @@ def extract_mask_features(img, enhanced_img, mask, metadata_mask):
     # Skip empty masks or masks with too few pixels
     if np.sum(valid_mask) < 50:
         return None
+
+    # Get bounding box coordinates
+    y_indices, x_indices = np.where(valid_mask)
+    y_min, y_max = np.min(y_indices), np.max(y_indices)
+    x_min, x_max = np.min(x_indices), np.max(x_indices)
+    height = y_max - y_min + 1
+    width = x_max - x_min + 1
 
     # Extract region of interest from original and enhanced images
     masked_img = img[valid_mask]
@@ -382,6 +379,18 @@ def extract_mask_features(img, enhanced_img, mask, metadata_mask):
     # Calculate compactness (circularity)
     compactness = 4 * np.pi * area / (perimeter * perimeter + 1e-10) if perimeter > 0 else 0
 
+    # Additional shape metrics
+    equivalent_diameter = np.sqrt(4 * area / np.pi)
+    extent = area / (height * width) if (height * width) > 0 else 0
+
+    # Solidity calculation (area / convex hull area)
+    if len(contours) > 0:
+        hull = cv2.convexHull(contours[0])
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0
+    else:
+        solidity = 0
+
     # Return feature dictionary
     features = {
         'mean_intensity': mean_intensity,
@@ -393,30 +402,37 @@ def extract_mask_features(img, enhanced_img, mask, metadata_mask):
         'enhanced_std': enhanced_std,
         'texture_complexity': texture_complexity,
         'area': area,
-        'compactness': compactness
+        'perimeter': perimeter,
+        'compactness': compactness,
+        'equivalent_diameter': equivalent_diameter,
+        'extent': extent,
+        'solidity': solidity,
+        'aspect_ratio': width / height if height > 0 else 1
     }
 
     return features
 
 
 def train_autoencoder(img, enhanced_img, masks, metadata_mask, epochs=50):
-    """
-    Train convolutional autoencoder on particle image patches.
+    """Train autoencoder on particle patches for feature extraction.
+
+    Extracts patches from the image, then trains an autoencoder to learn
+    a compact representation of particle features.
 
     Args:
-        img (numpy.ndarray): Original grayscale image
-        enhanced_img (numpy.ndarray): Preprocessed image
-        masks (list[numpy.ndarray]): SAM-generated masks
-        metadata_mask (numpy.ndarray): Valid region mask
-        epochs (int, optional): Training iterations. Defaults to 50.
+        img (numpy.ndarray): Original grayscale image.
+        enhanced_img (numpy.ndarray): Preprocessed image with enhanced features.
+        masks (list): List of binary masks identifying particles.
+        metadata_mask (numpy.ndarray): Binary mask defining valid image areas.
+        epochs (int): Number of training epochs.
 
     Returns:
-        tensorflow.keras.Model or None: Trained encoder model or None if insufficient data
+        tensorflow.keras.Model: Trained encoder model for feature extraction,
+                               or None if training fails.
     """
-    # Extract patches for training
+    # Extract patches for training using the standardized method
     print("Extracting patches for autoencoder training...")
-    patch_size = 64
-    patches = extract_particle_patches(enhanced_img, masks, patch_size, metadata_mask)
+    patches = extract_standardized_particle_patches(enhanced_img, masks, metadata_mask, target_size=32)
 
     if len(patches) < 10:
         print("Warning: Not enough particles detected for autoencoder training")
@@ -424,11 +440,11 @@ def train_autoencoder(img, enhanced_img, masks, metadata_mask, epochs=50):
 
     # Normalize patches
     patches_norm = patches.astype('float32') / 255.0
-    patches_norm = patches_norm.reshape(-1, patch_size, patch_size, 1)
+    patches_norm = patches_norm.reshape(-1, 32, 32, 1)
 
     # Build and train the autoencoder
     print(f"Training autoencoder on {len(patches_norm)} patches for {epochs} epochs")
-    autoencoder, encoder = build_autoencoder(input_shape=(patch_size, patch_size, 1))
+    autoencoder, encoder = build_autoencoder(input_shape=(32, 32, 1))
 
     # Train the autoencoder
     autoencoder.fit(
@@ -443,19 +459,22 @@ def train_autoencoder(img, enhanced_img, masks, metadata_mask, epochs=50):
     return encoder
 
 
-def extract_autoencoder_features(img, mask, encoder, metadata_mask, patch_size=64):
-    """
-    Generate deep feature vector for a masked region using trained encoder.
+def extract_autoencoder_features(img, mask, encoder, metadata_mask):
+    """Extract autoencoder features for a mask.
+
+    Uses a trained encoder to extract latent representation features
+    from the image region defined by the mask, using the standardized
+    aspect ratio preservation approach.
 
     Args:
-        img (numpy.ndarray): Preprocessed input image
-        mask (numpy.ndarray): Region of interest mask
-        encoder (tensorflow.keras.Model): Trained feature extractor
-        metadata_mask (numpy.ndarray): Valid region mask
-        patch_size (int, optional): Input size for encoder. Defaults to 64.
+        img (numpy.ndarray): Image to extract features from.
+        mask (numpy.ndarray): Binary mask defining the region of interest.
+        encoder (tensorflow.keras.Model): Trained encoder model.
+        metadata_mask (numpy.ndarray): Binary mask defining valid image areas.
 
     Returns:
-        numpy.ndarray or None: 128-dimensional feature vector or None for invalid regions
+        numpy.ndarray: Feature vector from encoder's latent space,
+                      or None if the mask is too small.
     """
     # Apply metadata mask
     valid_mask = mask & metadata_mask
@@ -464,51 +483,59 @@ def extract_autoencoder_features(img, mask, encoder, metadata_mask, patch_size=6
     if np.sum(valid_mask) < 50:
         return None
 
-    # Get mask center
+    # Get particle bounding box
     y_indices, x_indices = np.where(valid_mask)
     y_min, y_max = np.min(y_indices), np.max(y_indices)
     x_min, x_max = np.min(x_indices), np.max(x_indices)
 
-    center_y = (y_min + y_max) // 2
-    center_x = (x_min + x_max) // 2
+    # Extract the patch (crop using bounding box)
+    patch = img[y_min:y_max + 1, x_min:x_max + 1].copy()
 
-    # Define patch boundaries
-    half_size = patch_size // 2
-    y1 = max(0, center_y - half_size)
-    y2 = min(img.shape[0], center_y + half_size)
-    x1 = max(0, center_x - half_size)
-    x2 = min(img.shape[1], center_x + half_size)
+    # Create mask for this specific patch
+    local_mask = mask[y_min:y_max + 1, x_min:x_max + 1]
 
-    # Extract patch
-    patch = img[y1:y2, x1:x2].astype('float32') / 255.0
+    # Fill non-mask areas with black
+    patch[~local_mask] = 0
 
-    # Resize if necessary
-    if patch.shape[0] != patch_size or patch.shape[1] != patch_size:
-        patch = cv2.resize(patch, (patch_size, patch_size))
+    # Make it square by padding
+    h, w = patch.shape
+    max_side = max(h, w)
+    square_patch = np.zeros((max_side, max_side), dtype=patch.dtype)
+    y_offset = (max_side - h) // 2
+    x_offset = (max_side - w) // 2
+    square_patch[y_offset:y_offset + h, x_offset:x_offset + w] = patch
 
-    # Reshape for encoder
-    patch = patch.reshape(1, patch_size, patch_size, 1)
+    # Resize to encoder input size
+    resized = cv2.resize(square_patch, (32, 32), interpolation=cv2.INTER_AREA)
+
+    # Normalize and reshape for encoder
+    patch_norm = resized.astype('float32') / 255.0
+    patch_norm = patch_norm.reshape(1, 32, 32, 1)
 
     # Get feature vector
-    features = encoder.predict(patch, verbose=0)[0]
+    features = encoder.predict(patch_norm, verbose=0)[0]
 
     return features
 
 
 def train_gmm(mask_features, n_components=4, covariance_type='full'):
+    """Train a Gaussian Mixture Model on mask features.
 
-    """
-    Train Gaussian Mixture Model on extracted particle features.
+    Fits a GMM to the extracted particle features to enable material classification.
 
     Args:
-        mask_features (list[dict]): List of feature dictionaries from extract_mask_features
-        n_components (int, optional): Number of GMM components. Defaults to 4.
-        covariance_type (str, optional): Covariance matrix type. Defaults to 'full'.
+        mask_features (list): List of feature dictionaries for each particle.
+        n_components (int): Number of Gaussian components (material types) to model.
+        covariance_type (str): Type of covariance parameter for GMM.
 
     Returns:
-        tuple or None: (GMM model, StandardScaler, cluster mapping) or None on failure
+        tuple: (gmm, scaler, cluster_to_material) where:
+            - gmm is the trained GaussianMixture model
+            - scaler is the StandardScaler used for feature normalization
+            - cluster_to_material is a dictionary mapping cluster indices to material classes
+            or None if training fails.
     """
-    # Extract the relevant features for GMM training \
+    # Extract the relevant features for GMM training
     feature_matrix = []
 
     # For each mask with features
@@ -558,48 +585,55 @@ def train_gmm(mask_features, n_components=4, covariance_type='full'):
 
     # Map cluster indices to material classes based on intensity
     # 0: void (not used here since voids are defined by thresholding)
-    # 1: carbon black (darkest)
-    # 2: LFP (medium)
+    # 1: LFP (darkest) - SWAPPED from previous code
+    # 2: Carbon Black (medium) - SWAPPED from previous code
     # 3: NaCl (brightest)
     cluster_to_material = {}
 
     if n_components == 3:
-        # We have 3 clusters: carbon black, LFP, NaCl
+        # We have 3 clusters: LFP, Carbon Black, NaCl
+        material_map = {0: 1, 1: 2, 2: 3}  # Map to LFP=1, Carbon Black=2, NaCl=3
         for i, idx in enumerate(sorted_idx):
-            cluster_to_material[idx] = i + 1  # Start from class 1 (carbon black)
+            cluster_to_material[idx] = material_map[i]
     else:
         # Handle case with 4 clusters
-        # The darkest cluster might be voids or carbon black
-        # Check the mean intensity of the darkest cluster
+        # The darkest cluster might be voids or LFP
         darkest_idx = sorted_idx[0]
         darkest_intensity = centers_original[darkest_idx, 0]
 
         if darkest_intensity < 40:  # If very dark, it's void
             # Skip the darkest cluster and assign 1, 2, 3 to the rest
             cluster_to_material[darkest_idx] = 0  # void
+            material_map = {0: 1, 1: 2, 2: 3}  # Map to LFP=1, Carbon Black=2, NaCl=3
             for i, idx in enumerate(sorted_idx[1:4]):
-                cluster_to_material[idx] = i + 1
+                cluster_to_material[idx] = material_map[i]
         else:
             # All clusters are materials
-            for i, idx in enumerate(sorted_idx):
-                if i < 3:  # Only use first 3 clusters (we expect 3 materials)
-                    cluster_to_material[idx] = i + 1
+            material_map = {0: 1, 1: 2, 2: 3}  # Map to LFP=1, Carbon Black=2, NaCl=3
+            for i, idx in enumerate(sorted_idx[:3]):  # Only use first 3 clusters
+                cluster_to_material[idx] = material_map[i]
 
     # Store the scaler with the GMM for later use
     return gmm, scaler, cluster_to_material
 
 
 def classify_with_gmm(particle_features, gmm, scaler, cluster_to_material):
-    """Classify particle features using trained GMM model.
+    """Classify particles using the trained GMM.
+
+    Predicts material class for a particle based on its features using
+    the trained Gaussian Mixture Model.
 
     Args:
-        particle_features (dict): Feature dictionary from extract_mask_features
-        gmm (GaussianMixture): Trained GMM instance
-        scaler (StandardScaler): Feature normalizer
-        cluster_to_material (dict): Cluster to material class mapping
+        particle_features (dict): Dictionary of features for a particle.
+        gmm (GaussianMixture): Trained GMM model.
+        scaler (StandardScaler): Feature scaler used during GMM training.
+        cluster_to_material (dict): Mapping from cluster indices to material classes.
 
     Returns:
-        tuple or None: (material_class, confidence) or None for invalid input
+        tuple: (material_class, confidence) where:
+            - material_class is an integer identifying the material (1-3)
+            - confidence is a float indicating classification confidence
+            or None if classification fails.
     """
     if particle_features is None:
         return None
@@ -630,35 +664,44 @@ def classify_with_gmm(particle_features, gmm, scaler, cluster_to_material):
         mean_intensity = particle_features['mean_intensity']
 
         if mean_intensity < 60:
-            return 1, 0.8  # Carbon Black
+            return 1, 0.8  # LFP (darkest)
         elif mean_intensity < 150:
-            return 2, 0.8  # LFP
+            return 2, 0.8  # Carbon Black (medium)
         else:
-            return 3, 0.8  # NaCl
+            return 3, 0.8  # NaCl (brightest)
 
 
 def segment_with_gmm_sam(image_path, masks_path=None, output_dir=None,
                          void_threshold=10, epochs=50, gmm_components=4):
-    """
-    Main segmentation pipeline integrating SAM masks and GMM classification.
+    """Perform segmentation using SAM masks, autoencoder, and Gaussian Mixture Model.
 
-    Processing Steps:
-    1. Image loading and metadata detection
-    2. Feature extraction (traditional + deep learning)
-    3. GMM training and classification
-    4. Post-processing and visualization
-    5. Results export
+    Main function that orchestrates the complete segmentation pipeline:
+    1. Loads image and SAM masks
+    2. Detects and masks metadata regions
+    3. Enhances image with preprocessing
+    4. Trains autoencoder for feature extraction
+    5. Extracts features from particle masks
+    6. Trains GMM for material classification
+    7. Classifies each particle using GMM
+    8. Creates and post-processes segmentation map
+    9. Calculates material statistics
+    10. Visualizes and exports results
 
     Args:
-        image_path (str): Path to SEM image
-        masks_path (str, optional): Path to SAM masks pickle file
-        output_dir (str, optional): Output directory for results
-        void_threshold (int, optional): Intensity threshold for void detection. Defaults to 10.
-        epochs (int, optional): Autoencoder training epochs. Defaults to 50.
-        gmm_components (int, optional): Number of GMM components. Defaults to 4.
+        image_path (str): Path to the SEM image.
+        masks_path (str, optional): Path to the SAM masks pickle file.
+                                   If None, inferred from image_path.
+        output_dir (str, optional): Directory to save results.
+                                   If None, results are not saved.
+        void_threshold (int): Intensity threshold to classify pixels as voids.
+        epochs (int): Number of epochs for autoencoder training.
+                     Set to 0 to skip autoencoder.
+        gmm_components (int): Number of components for GMM.
 
     Returns:
-        tuple: (segmentation_map, statistics_dict)
+        tuple: (segmentation, stats) where:
+            - segmentation is a numpy.ndarray with class labels
+            - stats is a dictionary with material statistics
     """
     # If masks_path is not provided, infer it from image_path
     if masks_path is None:
@@ -745,11 +788,11 @@ def segment_with_gmm_sam(image_path, masks_path=None, output_dir=None,
             mean_intensity = features['mean_intensity']
 
             if mean_intensity < 60:
-                segmentation[mask] = 1  # Carbon Black
+                segmentation[mask] = 1  # LFP (darkest)
             elif mean_intensity < 150:
-                segmentation[mask] = 2  # LFP
+                segmentation[mask] = 2  # Carbon Black (medium)
             else:
-                segmentation[mask] = 3  # NaCl
+                segmentation[mask] = 3  # NaCl (brightest)
     else:
         # Unpack GMM results
         gmm, scaler, cluster_to_material = gmm_result
@@ -854,7 +897,7 @@ def segment_with_gmm_sam(image_path, masks_path=None, output_dir=None,
         closed = morphology.closing(material_mask, morphology.disk(2))
 
         # Remove small isolated regions (size depends on material)
-        min_size = 20 if material != 1 else 50  # Larger for carbon black
+        min_size = 20 if material != 2 else 50  # Larger for Carbon Black (now class 2)
         cleaned = morphology.remove_small_objects(closed, min_size=min_size)
 
         # Fill small holes
@@ -870,8 +913,9 @@ def segment_with_gmm_sam(image_path, masks_path=None, output_dir=None,
     # Step 9: Calculate material statistics
     stats = calculate_material_stats(processed, metadata_mask)
 
+    alpha = 0.6
     # Step 10: Visualize results
-    fig = visualize_segmentation(img, processed, image_path, metadata_mask)
+    fig = visualize_segmentation(img, processed, image_path, metadata_mask, alpha=alpha)
 
     # Step 11: Save results if output directory is provided
     if output_dir:
@@ -892,21 +936,25 @@ def segment_with_gmm_sam(image_path, masks_path=None, output_dir=None,
     return processed, stats
 
 
-def visualize_segmentation(original_img, segmented, image_path, metadata_mask=None):
-    """Generate comparative visualization of original and segmented images.
+def visualize_segmentation(original_img, segmented, image_path, metadata_mask=None, alpha=0.6):
+    """Create visualization of the segmentation results.
+
+    Creates a figure with side-by-side comparison of original image and
+    segmentation results with semi-transparent colors.
 
     Args:
-        original_img (numpy.ndarray): Source SEM image
-        segmented (numpy.ndarray): Segmentation class map
-        image_path (str): Source image path for labeling
-        metadata_mask (numpy.ndarray, optional): Valid region mask. Defaults to None.
+        original_img (numpy.ndarray): Original SEM image.
+        segmented (numpy.ndarray): Segmentation map with material classes.
+        image_path (str): Path to the original image file (for title).
+        metadata_mask (numpy.ndarray, optional): Binary mask defining valid image areas.
+        alpha (float, optional): Opacity of segmentation colors (0-1). Defaults to 0.6.
 
     Returns:
-        matplotlib.figure.Figure: Generated figure object
+        matplotlib.figure.Figure: Figure object with visualization.
     """
-    material_labels = ["Voids", "Carbon Black", "LFP", "NaCl"]
+    # Updated material labels with LFP and Carbon Black swapped
+    material_labels = ["Voids", "LFP", "Carbon Black", "NaCl"]
     colors = ['black', 'gray', 'green', 'white']
-    cmap = ListedColormap(colors)
 
     # Create figure
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7))
@@ -932,8 +980,26 @@ def visualize_segmentation(original_img, segmented, image_path, metadata_mask=No
     if metadata_mask is not None:
         vis_seg[~metadata_mask] = 0
 
-    # Plot segmented image
-    ax2.imshow(vis_seg, cmap=cmap, vmin=0, vmax=3)
+    # First display the grayscale image as background
+    ax2.imshow(vis_img, cmap='gray')
+
+    # Create colored overlay with transparency
+    overlay = np.zeros((*vis_img.shape, 4))  # RGBA
+
+    # Set colors with transparency for each class
+    for i in range(4):
+        if i == 0:  # Voids are fully transparent
+            continue
+
+        mask = (vis_seg == i)
+        if np.any(mask):
+            # Convert color string to RGBA
+            color = plt.cm.colors.to_rgba(colors[i])
+            # Set this class's pixels to its color with transparency
+            overlay[mask] = (*color[:3], alpha)
+
+    # Display the overlay on top of grayscale image
+    ax2.imshow(overlay)
     ax2.set_title("GMM+SAM Segmentation", fontsize=14)
     ax2.axis('off')
 
@@ -953,16 +1019,22 @@ def visualize_segmentation(original_img, segmented, image_path, metadata_mask=No
 
 
 def calculate_material_stats(segmented, metadata_mask=None):
-    """Calculate quantitative material distribution statistics.
+    """Calculate statistics about material distribution.
 
-        Args:
-            segmented (numpy.ndarray): Segmentation class map
-            metadata_mask (numpy.ndarray, optional): Valid region mask. Defaults to None.
+    Computes pixel counts and percentages for each material class.
 
-        Returns:
-            dict: Statistics containing pixel counts and percentages per class
+    Args:
+        segmented (numpy.ndarray): Segmentation map with material classes.
+        metadata_mask (numpy.ndarray, optional): Binary mask defining valid image areas.
+
+    Returns:
+        dict: Dictionary with statistics including:
+            - pixel_counts: Count of pixels per material
+            - percentages: Percentage of each material
+            - total_pixels: Total number of valid pixels
     """
-    material_labels = ["Voids", "Carbon Black", "LFP", "NaCl"]
+    # Updated material labels with LFP and Carbon Black swapped
+    material_labels = ["Voids", "LFP", "Carbon Black", "NaCl"]
 
     # Only count valid pixels (not in metadata area)
     if metadata_mask is not None:
@@ -994,15 +1066,19 @@ def calculate_material_stats(segmented, metadata_mask=None):
 
 
 def export_to_csv(segmented, image_path, output_path, metadata_mask=None):
-    """Export segmentation results to CSV format with pixel-level annotations.
+    """Export segmentation results to CSV.
 
-        Args:
-            segmented (numpy.ndarray): Segmentation class map
-            image_path (str): Source image path for metadata
-            output_path (str): Destination CSV file path
-            metadata_mask (numpy.ndarray, optional): Valid region mask. Defaults to None.
+    Creates a CSV file containing pixel coordinates and
+    corresponding material classifications.
+
+    Args:
+        segmented (numpy.ndarray): Segmentation map with material classes.
+        image_path (str): Path to the original image file.
+        output_path (str): Path to save the CSV file.
+        metadata_mask (numpy.ndarray, optional): Binary mask defining valid image areas.
     """
-    material_labels = ["Voids", "Carbon Black", "LFP", "NaCl"]
+    # Updated material labels with LFP and Carbon Black swapped
+    material_labels = ["Voids", "LFP", "Carbon Black", "NaCl"]
     h, w = segmented.shape
 
     # Create coordinate grids
@@ -1057,11 +1133,13 @@ def export_to_csv(segmented, image_path, output_path, metadata_mask=None):
 
 
 def main():
-    """Command-line interface for segmentation pipeline.
+    """Main function to handle command-line arguments.
 
-        System Exit Codes:
-            0: Success
-            1: Input file error
+    Parses command-line arguments and calls the segmentation function with
+    appropriate parameters.
+
+    Returns:
+        int: Exit code (0 for success, 1 for errors).
     """
     parser = argparse.ArgumentParser(description='SEM Image Segmentation with GMM, Autoencoder, and SAM Masks')
 
